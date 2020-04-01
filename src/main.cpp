@@ -2,41 +2,40 @@
 
 /*
 
-ESP32MQTTBASE 1.1
-Programa para utilizar de base en tus proyectos MQTT con ESP32
-Desarrollado con Visual Code + PlatformIO + Plataforma Espressif 32 Arduino
-Implementa las comunicaciones WIFI y MQTT asi como la configuracion de las mismas via comandos
-Implementa el envio de comandos via puerto serie o MQTT
+HMI-RESPIRADOR - Interfaz para el Respirator23 de CoronavirusMakers con ESP32 + Nextion y capacidad MQTT
+Desarrollado con Visual Code + PlatformIO + Plataforma Espressif 32 Arduino con funciones FreeRTOS
+Implementa las comunicaciones WIFI y MQTT asi como la configuracion de las mismas
 Implementa el uso de tareas para multiproceso y para usar ambos cores
 Implementa un timer con soporte para FPU (unidad de coma flotante) para utilizar en tareas que requieran mayor velocidad que una Task
-Incluye la clase MiProyecto para desarrollar nuestro proyecto.
 
-Author: Diego Maroto - BilbaoMakers 2019 - info@bilbaomakers.org - dmarofer@diegomaroto.net
+CoronavirusMakers 2020
+BilbaoMakers 2019 - info@bilbaomakers.org
 
-https://github.com/bilbaomakers/ESP32MQTTBASE
+https://www.coronavirusmakers.org
 
 https://bilbaomakers.org/
 
-Licencia: GNU General Public License v3.0 ( mas info en GitHub )
+Licencia: GNU General Public License v3.0
 
 */
 
 #pragma endregion
 
 #pragma region INCLUDES
-// Librerias comantadas en proceso de sustitucion por la WiFiMQTTManager
 
 #include <AsyncMqttClient.h>			// Vamos a probar esta que es Asincrona: https://github.com/marvinroger/async-mqtt-client
 #include <FS.h>							// Libreria Sistema de Ficheros
 #include <WiFi.h>						// Para las comunicaciones WIFI del ESP32
-#include <DNSServer.h>					// La necesita WifiManager para el portal captivo
-#include <WebServer.h>					// La necesita WifiManager para el formulario de configuracion (ESP32)
+//#include <DNSServer.h>					// La necesita WifiManager para el portal captivo
+//#include <WebServer.h>					// La necesita WifiManager para el formulario de configuracion (ESP32)
 #include <ArduinoJson.h>				// OJO: Tener instalada una version NO BETA (a dia de hoy la estable es la 5.13.4). Alguna pata han metido en la 6
 #include <string>						// Para el manejo de cadenas
-#include <Bounce2.h>					// Libreria para filtrar rebotes de los Switches: https://github.com/thomasfredericks/Bounce2
+//#include <Bounce2.h>					// Libreria para filtrar rebotes de los Switches: https://github.com/thomasfredericks/Bounce2
 #include <SPIFFS.h>						// Libreria para sistema de ficheros SPIFFS
-#include <NTPClient.h>					// Para la gestion de la hora por NTP
-#include <WiFiUdp.h>					// Para la conexion UDP con los servidores de hora.
+//#include <NTPClient.h>					// Para la gestion de la hora por NTP
+//#include <WiFiUdp.h>					// Para la conexion UDP con los servidores de hora.
+#include <ConfigCom.h>
+#include <Pantalla.h>
 
 #pragma endregion
 
@@ -46,10 +45,10 @@ Licencia: GNU General Public License v3.0 ( mas info en GitHub )
 static const uint64_t TIMER_TICK_US = 200;
 
 // Para el nombre del fichero de configuracion de comunicaciones
-static const String FICHERO_CONFIG_COM = "/MiProyectoCom.json";
+static const String FICHERO_CONFIG_COM = "/HMIRespiradorCom.json";
 
 // Para el nombre del fichero de configuracion del proyecto
-static const String FICHERO_CONFIG_PRJ = "/MiProyectoCfg.json";
+static const String FICHERO_CONFIG_PRJ = "/HMIRespiradorCfg.json";
 
 // Para la zona horaria (horas de diferencia con UTC)
 static const int HORA_LOCAL = 2;
@@ -75,376 +74,24 @@ portMUX_TYPE timerMux = portMUX_INITIALIZER_UNLOCKED;
 boolean SPIFFStatus = false;
 
 // Conexion UDP para la hora
-WiFiUDP UdpNtp;
+//WiFiUDP UdpNtp;
 
 // Manejador del NTP. Cliente red, servidor, offset zona horaria, intervalo de actualizacion.
 // FALTA IMPLEMENTAR ALGO PARA CONFIGURAR LA ZONA HORARIA
-NTPClient ClienteNTP(UdpNtp, "europe.pool.ntp.org", HORA_LOCAL * 3600, 3600);
+//NTPClient ClienteNTP(UdpNtp, "europe.pool.ntp.org", HORA_LOCAL * 3600, 3600);
 
 // Para el sensor de temperatura de la CPU. Definir aqui asi necesario es por no estar en core Arduino.
-extern "C" {uint8_t temprature_sens_read();}
+//extern "C" {uint8_t temprature_sens_read();}
 
-#pragma endregion
+// Para el manejador de ficheros de configuracion
+ConfigCom MiConfig = ConfigCom(FICHERO_CONFIG_COM);
 
-#pragma region CLASE ConfigClass
-
-class ConfigClass{
-
-	private:
-
-		String c_fichero;
-	
-	public:
-	
-		char mqttserver[40];
-		char mqttport[6];
-		char mqtttopic[33];
-		char mqttusuario[19];
-		char mqttpassword[19];
-
-		String cmndTopic;
-		String statTopic;
-		String teleTopic;
-		String lwtTopic;
-
-		// Esto no se salva en el fichero, lo hace el objeto Wifi
-		// Lo pongo aqui como almacenamiento temporal para los comandos de configuracion
-		char Wssid[30];
-		char WPasswd[100];
-
-		// Otras configuraciones permanentes del proyecto
-		
-		ConfigClass(String fichero);
-		~ConfigClass() {};
-
-		boolean leeconfig ();
-		boolean escribeconfig ();
-		
-};
-
-	// Constructor
-	ConfigClass::ConfigClass(String fichero){
-
-		c_fichero = fichero;
-
-		mqttserver[0]= '\0';
-		mqttport[0] = '\0';
-		mqtttopic[0] = '\0';
-		mqttusuario[0] = '\0';
-		mqttpassword[0] = '\0';
-
-		Wssid[0] = '\0';
-		WPasswd[0]  = '\0';	
-				
-	}
-
-	// Leer la configuracion desde el fichero
-	boolean ConfigClass::leeconfig(){
-	
-		if (SPIFFS.exists(c_fichero)) {
-			// Si existe el fichero abrir y leer la configuracion y asignarsela a las variables definidas arriba
-			File ComConfigFile = SPIFFS.open(c_fichero, "r");
-			if (ComConfigFile) {
-				size_t size = ComConfigFile.size();
-				// Declarar un buffer para almacenar el contenido del fichero
-				std::unique_ptr<char[]> buf(new char[size]);
-				// Leer el fichero al buffer
-				ComConfigFile.readBytes(buf.get(), size);
-				DynamicJsonBuffer jsonBuffer;
-				JsonObject& json = jsonBuffer.parseObject(buf.get());
-				//json.printTo(Serial);
-				
-				if (json.success()) {
-					Serial.print("Configuracion del fichero leida: ");
-					json.printTo(Serial);
-				  Serial.println("");
-
-					// Leer los valores del MQTT
-					strcpy(mqttserver, json["mqttserver"]);
-					strcpy(mqttport, json["mqttport"]);
-					strcpy(mqtttopic, json["mqtttopic"]);
-					strcpy(mqttusuario, json["mqttusuario"]);
-					strcpy(mqttpassword, json["mqttpassword"]);
-
-					// Dar valor a las strings con los nombres de la estructura de los topics
-					cmndTopic = "cmnd/" + String(mqtttopic) + "/#";
-					statTopic = "stat/" + String(mqtttopic);
-					teleTopic = "tele/" + String(mqtttopic);
-					lwtTopic = teleTopic + "/LWT";
-					return true;
-
-					Serial.println("Servidor MQTT: " + String(mqttserver)) + ":" + String(mqttport);
-					Serial.println("Topic Comandos: " + cmndTopic);
-					Serial.println("Topic Respuestas: " + statTopic);
-					Serial.println("Topic Telemetria: " + teleTopic);
-					Serial.println("Topic LWT: " + lwtTopic);
-										
-				}
-					
-				else {
-
-					Serial.println("No se puede cargar la configuracion desde el fichero");
-					return false;
-
-				}
-			}
-
-			else {
-
-				Serial.println ("No se puede leer el fichero de configuracion");
-				return false;
-
-			}
-
-		}
-
-		else	{
-
-				Serial.println("No se ha encontrado un fichero de configuracion.");
-				Serial.println("Por favor configura el dispositivo desde el terminal serie y reinicia el controlador.");
-				Serial.println("Informacion de los comandos con el comando Help");
-				return false;
-
-		}
-
-	}
-	
-	// Salvar la configuracion en el fichero
-	boolean ConfigClass::escribeconfig(){
-
-		Serial.println("Salvando la configuracion en el fichero");
-		DynamicJsonBuffer jsonBuffer;
-		JsonObject& json = jsonBuffer.createObject();
-		json["mqttserver"] = mqttserver;
-		json["mqttport"] = mqttport;
-		json["mqtttopic"] = mqtttopic;
-		json["mqttusuario"] = mqttusuario;
-		json["mqttpassword"] = mqttpassword;
-		
-		File ComConfigFile = SPIFFS.open(c_fichero, "w");
-		if (!ComConfigFile) {
-			Serial.println("No se puede abrir el fichero de configuracion de las comunicaciones");
-			return false;
-		}
-
-		//json.prettyPrintTo(Serial);
-		json.printTo(ComConfigFile);
-		ComConfigFile.close();
-		Serial.println("Configuracion Salvada");
-		
-		// Dar valor a las strings con los nombres de la estructura de los topics
-		cmndTopic = "cmnd/" + String(mqtttopic) + "/#";
-		statTopic = "stat/" + String(mqtttopic);
-		teleTopic = "tele/" + String(mqtttopic);
-		lwtTopic = teleTopic + "/LWT";
-
-		return true;
-
-	}
-
-	// Objeto de la clase ConfigClass (configuracion guardada en el fichero)
-	ConfigClass MiConfig = ConfigClass(FICHERO_CONFIG_COM);
-
-#pragma endregion
-
-#pragma region CLASE MiProyecto - Clase principial para Mi Proyecto
-
-// Una clase tiene 2 partes:
-// La primera es la definicion de todas las propiedades y metodos, publicos o privados.
-// La segunda es la IMPLEMENTACION de esos metodos o propiedades (que hacen). En C++ mas que nada de los METODOS (que son basicamente funciones)
-
-// Definicion
-class MiProyecto {
-
-#pragma region DEFINICIONES MiProyecto
-private:
-
-	// Variables Internas para uso de la clase
-
-	bool HayQueSalvar;
-	String mificheroconfig;
-
-	// Funciones Callback. Son funciones "especiales" que yo puedo definir FUERA de la clase y disparar DENTRO.
-	// Por ejemplo "una funcion que envie las respuestas a los comandos". Aqui no tengo por que decir ni donde ni como va a enviar esas respuestas.
-	// Solo tengo que definirla y cuando cree el objeto de esta clase en mi programa, creo la funcion con esta misma estructura y se la "paso" a la clase
-	// que la usara como se usa cualquier otra funcion y ella sabra que hacer
-
-	typedef void(*RespondeComandoCallback)(String comando, String respuesta);			// Definir como ha de ser la funcion de Callback (que le tengo que pasar y que devuelve)
-	RespondeComandoCallback MiRespondeComandos = nullptr;								// Definir el objeto que va a contener la funcion que vendra de fuera AQUI en la clase.
-	
-
-public:
-
-	MiProyecto(String fich_config_miproyecto);						// Constructor (es la funcion que devuelve un Objeto de esta clase)
-	~MiProyecto() {};												// Destructor (Destruye el objeto, o sea, lo borra de la memoria)
-
-	//  Variables Publicas
-	String HardwareInfo;											// Identificador del HardWare y Software
-	bool ComOK;														// Si la wifi y la conexion MQTT esta OK
-	
-	// Funciones Publicas
-	String MiEstadoJson(int categoria);								// Devuelve un JSON con los estados en un array de 100 chars (la libreria MQTT no puede con mas de 100)
-	void Run();														// Actualiza las propiedades de estado de este objeto en funcion del estado de motores y sensores
-	void SetRespondeComandoCallback(RespondeComandoCallback ref);	// Definir la funcion para pasarnos la funcion de callback del enviamensajes
-	boolean LeeConfig();
-	boolean SalvaConfig();
-
-};
+// Objeto de la clase Pantalla
+Pantalla MiPantalla(FICHERO_CONFIG_PRJ);
 
 #pragma endregion
 
 
-#pragma region IMPLEMENTACIONES MiProyecto
-
-// Constructor. Lo que sea que haya que hacer antes de devolver el objeto de esta clase al creador.
-MiProyecto::MiProyecto(String fich_config_miproyecto) {	
-
-	HardwareInfo = "MiProyecto.ESP32.1.0";
-	ComOK = false;
-	HayQueSalvar = false;
-	mificheroconfig = fich_config_miproyecto;
-
-}
-
-#pragma region Funciones Publicas
-
-// Pasar a esta clase la funcion callback de fuera. Me la pasan desde el programa con el metodo SetRespondeComandoCallback
-void MiProyecto::SetRespondeComandoCallback(RespondeComandoCallback ref) {
-
-	MiRespondeComandos = (RespondeComandoCallback)ref;
-
-}
-
-// Metodo que devuelve un JSON con el estado
-String MiProyecto::MiEstadoJson(int categoria) {
-
-	DynamicJsonBuffer jBuffer;
-	JsonObject& jObj = jBuffer.createObject();
-
-	// Dependiendo del numero de categoria en la llamada devolver unas cosas u otras
-	switch (categoria)
-	{
-
-	case 1:
-
-		// Esto llena de objetos de tipo "pareja propiedad valor"
-		jObj.set("TIME", ClienteNTP.getFormattedTime());							// HORA
-		jObj.set("HI", HardwareInfo);												// Info del Hardware
-		jObj.set("CS", ComOK);														// Info de la conexion WIFI y MQTT
-		jObj.set("RSSI", WiFi.RSSI());												// RSSI de la señal Wifi
-		jObj.set("HALL", hallRead());												// Campo magnetico en el MicroProcesador
-		jObj.set("ITEMP", (int)(temprature_sens_read() - 32) / 1.8);				// Temperatura de la CPU convertida a Celsius.
-
-		break;
-
-	case 2:
-
-		jObj.set("INFO2", "INFO2");							
-		
-		break;
-
-	default:
-
-		jObj.set("NOINFO", "NOINFO");						// MAL LLAMADO
-
-		break;
-	}
-
-
-	// Crear un buffer (aray de 100 char) donde almacenar la cadena de texto del JSON
-	char JSONmessageBuffer[200];
-
-	// Tirar al buffer la cadena de objetos serializada en JSON con la propiedad printTo del objeto de arriba
-	jObj.printTo(JSONmessageBuffer, sizeof(JSONmessageBuffer));
-
-	// devolver el char array con el JSON
-	return JSONmessageBuffer;
-	
-}
-
-boolean MiProyecto::SalvaConfig(){
-	
-
-	File mificheroconfig_handler = SPIFFS.open(mificheroconfig, "w");
-
-	if (!mificheroconfig_handler) {
-		Serial.println("No se puede abrir el fichero de configuracion de mi proyecto");
-		return false;
-	}
-
-	if (mificheroconfig_handler.print(MiEstadoJson(1))){
-
-		return true;
-
-	}
-
-	else {
-
-		return false;
-
-	}
-
-}
-
-boolean MiProyecto::LeeConfig(){
-
-	// Sacar del fichero de configuracion, si existe, las configuraciones permanentes
-	if (SPIFFS.exists(mificheroconfig)) {
-
-		File mificheroconfig_handler = SPIFFS.open(mificheroconfig, "r");
-		if (mificheroconfig_handler) {
-			size_t size = mificheroconfig_handler.size();
-			// Declarar un buffer para almacenar el contenido del fichero
-			std::unique_ptr<char[]> buf(new char[size]);
-			// Leer el fichero al buffer
-			mificheroconfig_handler.readBytes(buf.get(), size);
-			DynamicJsonBuffer jsonBuffer;
-			JsonObject& json = jsonBuffer.parseObject(buf.get());
-			if (json.success()) {
-
-				Serial.print("Configuracion de mi proyecto Leida: ");
-				json.printTo(Serial);
-				Serial.println("");
-				return true;
-
-			}
-
-			return false;
-
-		}
-
-		return false;
-
-	}
-
-	return false;
-
-}
-
-// Metodos (funciones). TODAS Salvo la RUN() deben ser ASINCRONAS. Jamas se pueden quedar uno esperando. Esperar a lo bobo ESTA PROHIBIDISISISISMO, tenemos MUCHAS cosas que hacer ....
-
-// Esta funcion se lanza desde una Task y hace las "cosas periodicas de la clase". No debe atrancarse nunca tampoco por supuesto (ni esta ni ninguna)
-void MiProyecto::Run() {
-	
-	
-	if (HayQueSalvar){
-
-		SalvaConfig();
-		HayQueSalvar = false;
-
-	}
-
-}
-
-#pragma endregion
-
-
-#pragma endregion
-
-
-// Objeto de la clase MiProyecto.
-
-MiProyecto MiProyectoOBJ(FICHERO_CONFIG_PRJ);
 
 #pragma endregion
 
@@ -462,11 +109,13 @@ void WiFiEventCallBack(WiFiEvent_t event) {
     	case SYSTEM_EVENT_STA_GOT_IP:
      	   	Serial.print("Conexion WiFi: Conetado. IP: ");
       	  	Serial.println(WiFi.localIP());
-			ClienteNTP.begin();
-			if (ClienteNTP.update()){
+			/*
+			MiPantalla.ClienteNTP.begin();
+			
+			if (MiPantalla.ClienteNTP.update()){
 
 				Serial.print("Reloj Actualizado via NTP: ");
-				Serial.println(ClienteNTP.getFormattedTime());
+				Serial.println(MiPantalla.ClienteNTP.getFormattedTime());
 				
 			}
 			else{
@@ -474,7 +123,8 @@ void WiFiEventCallBack(WiFiEvent_t event) {
 				Serial.println("ERR: No se puede actualizar la hora via NTP");
 
 			}
-			
+			*/
+
         	break;
     	case SYSTEM_EVENT_STA_DISCONNECTED:
         	Serial.println("Conexion WiFi: Desconetado");
@@ -532,9 +182,9 @@ void onMqttConnect(bool sessionPresent) {
 	else{
 
 		// Si todo ha ido bien, proceso de inicio terminado.
-		MiProyectoOBJ.ComOK = true;
+		MiPantalla.ComOK = true;
 		Serial.print("** ");
-		Serial.print(ClienteNTP.getFormattedTime());
+		//Serial.print(MiPantalla.ClienteNTP.getFormattedTime());
 		Serial.println(" - SISTEMA INICIADO CORRECTAMENTE **");
 
 	}
@@ -636,7 +286,7 @@ void MandaTelemetria() {
 			ObjJson.set("TIPO","MQTT");
 			ObjJson.set("CMND","TELE");
 			ObjJson.set("MQTTT",t_topic);
-			ObjJson.set("RESP",MiProyectoOBJ.MiEstadoJson(1));
+			ObjJson.set("RESP",MiPantalla.MiEstadoJson(1));
 			
 			char JSONmessageBuffer[300];
 			ObjJson.printTo(JSONmessageBuffer, sizeof(JSONmessageBuffer));
@@ -831,7 +481,7 @@ void TaskEnviaRespuestas( void * parameter ){
 					if (TIPO == "BOTH"){
 
 						ClienteMQTT.publish(MQTTT.c_str(), 2, false, RESP.c_str());
-						Serial.println(ClienteNTP.getFormattedTime() + " " + CMND + " " + RESP);
+						//Serial.println(MiPantalla.ClienteNTP.getFormattedTime() + " " + CMND + " " + RESP);
 						
 					}
 
@@ -843,7 +493,7 @@ void TaskEnviaRespuestas( void * parameter ){
 					
 					else 	if (TIPO == "SERIE"){
 
-							Serial.println(ClienteNTP.getFormattedTime() + " " + CMND + " " + RESP);
+							//Serial.println(MiPantalla.ClienteNTP.getFormattedTime() + " " + CMND + " " + RESP);
 						
 					}
 						
@@ -955,7 +605,7 @@ void TaskMiProyectoRun( void * parameter ){
 	
 	while(true){
 
-		MiProyectoOBJ.Run();
+		MiPantalla.Run();
 
 		vTaskDelayUntil( &xLastWakeTime, xFrequency );
 
@@ -1043,10 +693,10 @@ void setup() {
 	Serial.begin(115200);
 	Serial.println();
 
-	Serial.println("-- Iniciando Controlador MiProyecto --");
+	Serial.println("-- Iniciando HMI Respirator23 --");
 
 	// Asignar funciones Callback
-	MiProyectoOBJ.SetRespondeComandoCallback(MandaRespuesta);
+	MiPantalla.SetRespondeComandoCallback(MandaRespuesta);
 		
 	// Comunicaciones
 	ClienteMQTT = AsyncMqttClient();
@@ -1084,8 +734,8 @@ void setup() {
 	
 		}
 
-		// Leer configuracion salvada del Objeto MiProyectoOBJ
-		MiProyectoOBJ.LeeConfig();
+		// Leer configuracion salvada del Objeto MiPantalla
+		MiPantalla.LeeConfig();
 
 	}
 
